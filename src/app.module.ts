@@ -15,6 +15,7 @@ import { HttpErrorFilter } from './interfaces/http/error.filter';
 import { HealthController } from './interfaces/http/health.controller';
 import { WageringController } from './interfaces/http/wagering.controller';
 import { WalletsController } from './interfaces/http/wallets.controller';
+import { WagerConsumerService } from './interfaces/sqs/wager-consumer.service';
 
 type Deps = [UnitOfWork, Clock, IdGenerator];
 const deps = [UNIT_OF_WORK, CLOCK, ID_GENERATOR];
@@ -51,6 +52,7 @@ const deps = [UNIT_OF_WORK, CLOCK, ID_GENERATOR];
         );
       },
     },
+    WagerConsumerService,
     { provide: APP_GUARD, useClass: AuthGuard },
     { provide: APP_FILTER, useClass: HttpErrorFilter },
   ],
