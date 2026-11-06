@@ -12,7 +12,8 @@
     "test": "bun test",
     "test:unit": "bun test test/unit",
     "test:integration": "bun test test/integration --timeout 30000",
-    "test:concurrency": "bun test test/concurrency --timeout 120000"
+    "test:concurrency": "bun test test/concurrency --timeout 120000",
+    "test:load": "bun test/load/run-load.ts"
   },
   "dependencies": {
     "@aws-sdk/client-sqs": "^3.1163.0",
