@@ -27,6 +27,7 @@ export class WagerConsumerService implements OnApplicationBootstrap, BeforeAppli
       queueUrl: this.config.WAGER_QUEUE_URL,
       dlqUrl: this.config.WAGER_DLQ_URL,
       retryBaseSeconds: this.config.CONSUMER_RETRY_BASE_SECONDS,
+      visibilityTimeoutSeconds: this.config.CONSUMER_VISIBILITY_TIMEOUT_SECONDS,
       observer: {
         onAck: (outcome) => this.metrics.sqsAcks.inc({ outcome }),
         onRetry: () => this.metrics.sqsRetries.inc(),

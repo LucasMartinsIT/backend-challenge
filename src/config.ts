@@ -15,6 +15,8 @@ const schema = z.object({
   PENDING_POLL_MS: z.coerce.number().int().min(10).default(1000),
   PENDING_MAX_ATTEMPTS: z.coerce.number().int().min(1).default(12),
   PENDING_BASE_DELAY_MS: z.coerce.number().int().min(1).default(1000),
+  // precisa ser o mesmo VisibilityTimeout configurado na fila
+  CONSUMER_VISIBILITY_TIMEOUT_SECONDS: z.coerce.number().int().min(1).default(30),
   CONSUMER_RETRY_BASE_SECONDS: z.coerce.number().int().min(0).default(2),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   INSTANCE_ID: z.string().default(`pid-${process.pid}`),
