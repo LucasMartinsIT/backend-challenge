@@ -1,5 +1,5 @@
 import type { MikroORM, SqlEntityManager } from '@mikro-orm/postgresql';
-import type { Repositories, UnitOfWork } from '../../application/ports';
+import type { Repositories, UnitOfWork, UnitOfWorkOptions } from '../../application/ports';
 import { buildRepositories } from './repositories';
 
 // 40P01 deadlock, 40001 serialization failure, 55P03 lock_timeout estourado
@@ -17,13 +17,18 @@ export class MikroOrmUnitOfWork implements UnitOfWork {
     private readonly hooks: UnitOfWorkHooks = {},
   ) {}
 
-  async run<T>(work: (repos: Repositories) => Promise<T>): Promise<T> {
+  async run<T>(work: (repos: Repositories) => Promise<T>, options: UnitOfWorkOptions = {}): Promise<T> {
     for (let attempt = 1; ; attempt++) {
       try {
         // fork por tentativa: cada transação começa com um EntityManager limpo
         return await this.orm.em.fork().transactional(async (em) => {
           const sql = em as SqlEntityManager;
           await sql.execute(`set local lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
+          if (options.idleInTransactionTimeoutMs) {
+            await sql.execute(
+              `set local idle_in_transaction_session_timeout = '${Math.floor(options.idleInTransactionTimeoutMs)}ms'`,
+            );
+          }
           return work(buildRepositories(sql));
         });
       } catch (err) {

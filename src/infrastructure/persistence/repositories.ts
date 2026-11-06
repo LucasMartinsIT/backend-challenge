@@ -5,6 +5,8 @@ import {
   type LedgerPage,
   type LedgerRepository,
   type OutboxRepository,
+  type PendingReferenceCandidate,
+  type PendingReferenceRow,
   type ReconciliationSnapshot,
   type Repositories,
   type RetrySchedule,
@@ -14,7 +16,7 @@ import {
   type WalletRepository,
 } from '../../application/ports';
 import { InboxMessage } from '../../domain/messaging/inbox-message';
-import type { OutboxMessage } from '../../domain/messaging/outbox-message';
+import { OutboxMessage } from '../../domain/messaging/outbox-message';
 import { Money } from '../../domain/money/money';
 import type { WagerTransaction } from '../../domain/wagering/wager-transaction';
 import type { Wallet } from '../../domain/wallet/wallet';
@@ -88,6 +90,39 @@ class PgWagerTransactionRepository implements WagerTransactionRepository {
       WagerTransactionSchema,
       transactionToRecord(tx, balanceAfter, schedule?.attempts ?? 0, schedule?.nextAttemptAt ?? null),
     );
+  }
+
+  async findDuePendingReference(now: Date, limit: number): Promise<PendingReferenceCandidate[]> {
+    const rows: Array<{ id: string; wallet_id: string }> = await this.em.execute(
+      `select id, wallet_id from wager_transactions
+        where status = 'PENDING_REFERENCE' and next_attempt_at <= ?
+        order by next_attempt_at
+        limit ?`,
+      [now, limit],
+    );
+    return rows.map((r) => ({ id: r.id, walletId: r.wallet_id }));
+  }
+
+  async findPendingReferenceForUpdate(id: string, dueBefore?: Date): Promise<PendingReferenceRow | undefined> {
+    // Com várias instâncias, todas leem a mesma lista de vencidas. Quem espera o lock da wallet
+    // e relê depois do commit de outra precisa ver que a linha já foi reagendada.
+    const r = await this.em.findOne(
+      WagerTransactionSchema,
+      dueBefore
+        ? { id, status: 'PENDING_REFERENCE', nextAttemptAt: { $lte: dueBefore } }
+        : { id, status: 'PENDING_REFERENCE' },
+      { ...READ, lockMode: LockMode.PESSIMISTIC_WRITE },
+    );
+    if (!r) return undefined;
+    return {
+      transaction: transactionToDomain(r),
+      balanceAfter: r.balanceAfter ? moneyFromDb(r.balanceAfter, r.currency) : undefined,
+      attempts: r.attempts,
+    };
+  }
+
+  async rescheduleReference(id: string, attempts: number, nextAttemptAt: Date) {
+    await this.em.nativeUpdate(WagerTransactionSchema, { id }, { attempts, nextAttemptAt });
   }
 
   async hasProcessedReversalOf(referenceTransactionId: string) {
@@ -257,8 +292,68 @@ class PgInboxRepository implements InboxRepository {
   }
 }
 
+interface OutboxRow {
+  id: string;
+  aggregate_id: string;
+  event_type: string;
+  payload: Record<string, unknown>;
+  occurred_at: Date;
+  attempts: number;
+  next_attempt_at: Date | null;
+  published_at: Date | null;
+  failed_at: Date | null;
+}
+
 class PgOutboxRepository implements OutboxRepository {
   constructor(private readonly em: SqlEntityManager) {}
+
+  async lockDue(now: Date, limit: number) {
+    const rows: OutboxRow[] = await this.em.execute(
+      `select id, aggregate_id, event_type, payload, occurred_at, attempts, next_attempt_at, published_at, failed_at
+         from outbox_messages
+        where published_at is null and failed_at is null and (next_attempt_at is null or next_attempt_at <= ?)
+        order by occurred_at, id
+        limit ?
+        for update skip locked`,
+      [now, limit],
+    );
+    return rows.map((r) =>
+      OutboxMessage.rehydrate({
+        id: r.id,
+        aggregateId: r.aggregate_id,
+        eventType: r.event_type,
+        payload: r.payload,
+        occurredAt: new Date(r.occurred_at),
+        attempts: r.attempts,
+        nextAttemptAt: r.next_attempt_at ? new Date(r.next_attempt_at) : undefined,
+        publishedAt: r.published_at ? new Date(r.published_at) : undefined,
+        failedAt: r.failed_at ? new Date(r.failed_at) : undefined,
+      }),
+    );
+  }
+
+  async save(m: OutboxMessage) {
+    await this.em.execute(
+      `update outbox_messages set attempts = ?, next_attempt_at = ?, published_at = ?, failed_at = ? where id = ?`,
+      [m.attempts, m.nextAttemptAt ?? null, m.publishedAt ?? null, m.failedAt ?? null, m.id],
+    );
+  }
+
+  async stats(now: Date) {
+    // abandonadas ficam de fora do lag (senão o alerta dispara para sempre); contam à parte
+    const [row]: Array<{ pending: number; age: number; failed: number }> = await this.em.execute(
+      `select count(*) filter (where failed_at is null)::int as pending,
+              coalesce(extract(epoch from (?::timestamptz - min(occurred_at) filter (where failed_at is null))), 0)::float as age,
+              count(*) filter (where failed_at is not null)::int as failed
+         from outbox_messages where published_at is null`,
+      [now],
+    );
+    return {
+      pending: row?.pending ?? 0,
+      oldestAgeSeconds: Math.max(row?.age ?? 0, 0),
+      failed: row?.failed ?? 0,
+    };
+  }
 
   async add(m: OutboxMessage) {
     await this.em.execute(
