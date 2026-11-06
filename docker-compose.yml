@@ -1,3 +1,13 @@
+x-app-env: &app-env
+  DATABASE_URL: postgres://wagering:wagering@postgres:5432/wagering
+  AWS_ENDPOINT: http://localstack:4566
+  AWS_REGION: us-east-1
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  WAGER_QUEUE_URL: http://localstack:4566/000000000000/wager-transactions.fifo
+  WAGER_DLQ_URL: http://localstack:4566/000000000000/wager-transactions-dlq.fifo
+  EVENTS_QUEUE_URL: http://localstack:4566/000000000000/wallet-events.fifo
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -31,6 +41,46 @@ services:
       interval: 3s
       timeout: 5s
       retries: 30
+
+  # Os serviços abaixo só sobem com o perfil "app":
+  #   docker compose --profile app up -d --build --scale app=3
+  # Sem o perfil, o compose sobe só as dependências (usado no desenvolvimento e nos testes).
+  migrate:
+    profiles: ["app"]
+    image: wagering-processor:local
+    build: .
+    command: ["bun", "src/infrastructure/mikro-orm/migrate.ts", "up"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    profiles: ["app"]
+    image: wagering-processor:local
+    build: .
+    # faixa de portas para permitir --scale: cada réplica pega a próxima livre
+    ports:
+      - "3000-3009:3000"
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - "CMD"
+        - "bun"
+        - "-e"
+        - "fetch('http://localhost:3000/health/ready').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
 
 volumes:
   pgdata:

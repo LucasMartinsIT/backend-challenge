@@ -19,7 +19,8 @@ const schema = z.object({
   CONSUMER_VISIBILITY_TIMEOUT_SECONDS: z.coerce.number().int().min(1).default(30),
   CONSUMER_RETRY_BASE_SECONDS: z.coerce.number().int().min(0).default(2),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
-  INSTANCE_ID: z.string().default(`pid-${process.pid}`),
+  // no Docker todo contêiner tem pid parecido; o HOSTNAME (id do contêiner) distingue as réplicas
+  INSTANCE_ID: z.string().default(`${process.env.HOSTNAME ?? 'pid'}-${process.pid}`),
   // permitem subir uma instância só de API ou só de workers
   ENABLE_CONSUMER: z.stringbool().default(true),
   ENABLE_WORKERS: z.stringbool().default(true),
