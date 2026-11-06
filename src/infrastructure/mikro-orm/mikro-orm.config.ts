@@ -14,6 +14,7 @@ export function buildOrmConfig(clientUrl: string) {
       tableName: 'mikro_orm_migrations',
       transactional: true,
       allOrNothing: true,
+      snapshot: false,
     },
     pool: { min: 2, max: 10 },
     // o domínio é reidratado manualmente; não quero o ORM decidindo flush implícito
