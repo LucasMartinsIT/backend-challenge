@@ -93,10 +93,15 @@ export class SqsWagerConsumer {
     this.stopping = true;
     this.abort.abort();
     if (!this.loop) return;
-    const finished = await Promise.race([
-      this.loop.then(() => true),
-      sleep(this.shutdownTimeoutMs).then(() => false),
-    ]);
+
+    // O timer precisa ser cancelado: um setTimeout pendente mantém o processo vivo até
+    // disparar, e o shutdown ficaria esperando o timeout inteiro mesmo sem nada em andamento.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<false>((resolve) => {
+      timer = setTimeout(() => resolve(false), this.shutdownTimeoutMs);
+    });
+    const finished = await Promise.race([this.loop.then(() => true as const), timedOut]);
+    clearTimeout(timer);
     if (!finished) {
       this.logger.warn({ msg: 'shutdown atingiu o timeout com mensagens em andamento', event: 'sqs.shutdown_timeout' });
     }

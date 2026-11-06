@@ -9,10 +9,12 @@ export interface ReadinessResult {
 const TIMEOUT_MS = 2000;
 
 function withTimeout<T>(promise: Promise<T>): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), TIMEOUT_MS)),
-  ]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('timeout')), TIMEOUT_MS);
+  });
+  // cancelar o timer evita que ele segure o processo vivo depois da resposta
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 export class ReadinessChecker {
