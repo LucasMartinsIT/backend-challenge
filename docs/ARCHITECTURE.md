@@ -245,7 +245,7 @@ Há testes para os dois casos. A morte entre o envio e o commit é simulada com 
 
 **Eventos.** `WagerTransactionProcessed` (qualquer transação aplicada, inclusive `LOSS`), `WagerTransactionRejected`, `WagerTransactionPendingReference` e `WalletBalanceChanged` (somente quando o saldo muda). O envelope é uma classe abstrata com `eventType` e `version` no tipo, e o payload leva dinheiro como `MoneyProps` (string decimal), nunca a instância de `Money`.
 
-**Ordem dos eventos.** Dentro de um lote, os eventos de uma mesma wallet saem em sequência e, se um falha, os seguintes esperam. **Entre publicadores diferentes a ordem global não é garantida.** Isso é um limite consciente (seção 17). Para o consumidor ordenar e deduplicar, o envelope traz `eventId` e `WalletBalanceChanged` traz `walletVersion`.
+**Ordem dos eventos.** Dentro de um lote, os eventos de uma mesma wallet saem em sequência e, se um falha, os seguintes esperam. **Entre publicadores diferentes a ordem global não é garantida.** Isso é um limite consciente (seção 18). Para o consumidor ordenar e deduplicar, o envelope traz `eventId` e `WalletBalanceChanged` traz `walletVersion`.
 
 ## 13. Referências fora de ordem
 
@@ -291,7 +291,19 @@ O invariante `wallet.balance == saldo reconstruído pelo ledger` é conferido ao
 
 **Determinismo.** A suíte inteira passa em rodadas seguidas. Nos testes com filas uso filas próprias por execução (nome único), para não colidir com as filas do projeto nem com a aplicação rodando ao mesmo tempo.
 
-## 17. Limitações e riscos que conheço
+## 17. Quando uma dependência cai
+
+Além dos testes automatizados, derrubei as dependências de verdade com 3 réplicas rodando pelo Docker Compose:
+
+| Situação | O que acontece |
+|---|---|
+| **Postgres parado** | A API responde **503 com `Retry-After: 1`**. `/health/ready` marca `postgres: down` e `/health/live` continua 200. Ao voltar, a aplicação se recupera sozinha, sem reiniciar. |
+| **Postgres congelado** (a conexão não é recusada, só para de responder) | 503 depois de uns 30 s, esperando o pool. É lento: um provedor com timeout menor desiste antes e reenvia com a mesma `Idempotency-Key`, o que é seguro. |
+| **SQS fora do ar** | As apostas continuam sendo aceitas (201 em milissegundos) e os eventos se acumulam na outbox. `/health/ready` marca `sqs: down`. Quando o SQS volta, a outbox esvazia sozinha (6 eventos acumulados foram publicados) e o consumidor volta a consumir, sem reiniciar nada. |
+
+O processamento financeiro não depende do SQS estar de pé: o evento fica gravado na mesma transação e sai depois. Esse teste achou um defeito que os automatizados não pegavam: com o contêiner do Postgres parado, o Docker remove o nome do host do DNS, o erro era `EAI_AGAIN` e eu não o tratava como transitório, então a API respondia 500 em vez de 503. Agora `EAI_AGAIN`, `ENOTFOUND` e outros erros de rede são classificados como transitórios (com teste).
+
+## 18. Limitações e riscos que conheço
 
 - **Hot wallet serializa.** É uma consequência direta da escolha pelo lock pessimista.
 - **A vazão do publicador da outbox ficou abaixo da produção de eventos no teste de carga** (lag de ~14 s no pico, 27 s para esvaziar; veja `docs/LOAD_TEST.md`). Os eventos não se perdem, mas o atraso existe. Ele é consequência, pelo menos em parte, de enviar em sequência os eventos de uma mesma wallet para manter a ordem. Aumentar o lote não ajudou.
@@ -300,13 +312,15 @@ O invariante `wallet.balance == saldo reconstruído pelo ledger` é conferido ao
 - **O banco não garante sozinho que `wallets.balance` bate com o último `balance_after` do ledger.** Quem garante é o código, dentro do lock, e a reconciliação detecta divergência. Uma evolução possível é um trigger deferred.
 - **O publicador mantém uma transação aberta durante o envio ao SQS.** Mitigado pelo timeout de sessão ociosa e pelo timeout de 5s por envio, mas continua sendo uma transação com I/O externo dentro. Uma alternativa seria um *lease* com transações curtas.
 - **Latência das pendências** de até 60s depois que a referência chega.
+- **Banco congelado dá 503 só depois de ~30 s.** Não configurei um prazo menor para obter conexão do pool; é um ajuste simples, mas deixei no padrão.
+- **O LocalStack não persiste estado.** Reiniciar só ele perde as filas até o contêiner ser recriado (o script de init roda na criação). Na AWS real as filas são duráveis, então isso é uma característica do ambiente local.
 - **Os relógios das instâncias definem os agendamentos** (`next_attempt_at`). Assumo relógios sincronizados (NTP).
 - **O shutdown por sinal foi testado dentro do processo**, não enviando `SIGTERM` a um processo real, porque no Windows o sinal termina o processo à força. O que testo em processo real é a morte abrupta (`SIGKILL`) e o reinício.
 - **LocalStack não é a AWS.** Encontrei uma diferença: ao devolver uma mensagem com visibilidade 0, o LocalStack destrava o grupo FIFO antes da hora. Escrevi o código para funcionar nos dois, mas não testei contra a AWS de verdade.
 - **Métricas são por instância.** Quem agrega é o Prometheus.
 - **A moeda efetivamente usada é BRL** nos testes, apesar de o modelo ser multi-moeda.
 
-## 18. O que eu faria com mais tempo
+## 19. O que eu faria com mais tempo
 
 - Autenticação com o desenho da seção 15.
 - Enviar com `SendMessageBatch` os eventos de uma mesma wallet, para tirar o gargalo do publicador sem perder a ordem.

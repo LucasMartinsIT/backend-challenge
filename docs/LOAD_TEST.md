@@ -48,7 +48,7 @@ Uma segunda execução, com `OUTBOX_BATCH_SIZE=250` em vez de 50, deu 409 req/s,
 
 Tentei aumentar o lote de 50 para 250 e **não mudou nada** (lag de 14,5 s contra 13,9 s). Então o tamanho do lote não é o limite. Minha hipótese, que **não verifiquei**: como mantenho a ordem dentro de cada wallet, os eventos de uma mesma wallet são enviados um de cada vez, e com 80% do tráfego em 20 wallets o envio dessas wallets quentes vira uma fila sequencial, com uma ida ao SQS por evento. Se for isso, o caminho é enviar os eventos de uma mesma wallet juntos com `SendMessageBatch` (o SQS FIFO preserva a ordem dentro do lote). Também pode haver parte de custo do LocalStack e da máquina compartilhada que eu não separei.
 
-Esse é o custo direto da decisão de preservar a ordem por wallet dentro do publicador (ver `ARCHITECTURE.md`, seções 12 e 17). Em uma carga com tráfego mais espalhado entre wallets, esperaria um lag menor, mas não testei.
+Esse é o custo direto da decisão de preservar a ordem por wallet dentro do publicador (ver `ARCHITECTURE.md`, seções 12 e 18). Em uma carga com tráfego mais espalhado entre wallets, esperaria um lag menor, mas não testei.
 
 ## O que este teste não mostra
 

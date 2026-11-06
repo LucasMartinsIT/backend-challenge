@@ -24,9 +24,21 @@ O Postgres do compose usa a porta **5433** (e não a 5432) para não brigar com 
 
 Para rodar sem recarregar: `bun run start`.
 
-### Várias instâncias
+### Tudo pelo Docker Compose, com 3 réplicas
 
-A aplicação é pensada para rodar em várias instâncias ao mesmo tempo. Basta mudar a porta:
+```bash
+docker compose --profile app up -d --build --scale app=3 --wait
+```
+
+Sobe o Postgres e o LocalStack, roda as migrations uma vez (serviço `migrate`) e levanta 3 réplicas da aplicação, cada uma com seu consumidor e seus workers. As réplicas ocupam a faixa de portas 3000 a 3009, uma por réplica; veja quais com `docker compose ps`. Depois de recriar as réplicas, as portas podem mudar (o Docker pega a próxima livre).
+
+Sem o perfil `app`, o compose sobe só o Postgres e o LocalStack, que é o que o desenvolvimento e os testes usam. Para derrubar só as réplicas: `docker compose rm -sf app migrate`. Não rode isso junto com `bun run dev`, porque as portas coincidem.
+
+Se reiniciar **só** o LocalStack (`docker compose stop/start localstack`), as filas se perdem, porque o emulador não persiste estado. Recrie o contêiner para o script de init rodar de novo: `docker compose up -d --force-recreate --wait localstack`.
+
+### Várias instâncias sem Docker
+
+A aplicação roda em várias instâncias ao mesmo tempo. Fora do Docker, basta mudar a porta:
 
 ```bash
 PORT=3001 INSTANCE_ID=b bun run start
