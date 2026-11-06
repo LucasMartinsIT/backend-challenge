@@ -222,6 +222,79 @@ describe('consultas', () => {
   });
 });
 
+async function scrape() {
+  const res = await fetch(`${base}/metrics`);
+  expect(res.status).toBe(200);
+  expect(res.headers.get('content-type')).toContain('text/plain');
+  return res.text();
+}
+
+/** Valor de uma série, ex.: sample(text, 'wager_transactions_total{status="PROCESSED",kind="BET"}'). */
+function sample(text: string, series: string): number {
+  const line = text.split('\n').find((l) => l.startsWith(`${series} `));
+  return line ? Number(line.slice(series.length + 1)) : 0;
+}
+
+describe('observabilidade', () => {
+  test('/metrics é público, expõe tudo o que o enunciado pede e acompanha o tráfego', async () => {
+    const before = await scrape();
+    for (const name of [
+      'wager_transactions_total',
+      'idempotent_replays_total',
+      'inbox_duplicates_total',
+      'sqs_retries_total',
+      'sqs_dlq_total',
+      'lock_conflicts_total',
+      'outbox_lag_seconds',
+      'outbox_pending',
+      'wager_processing_seconds_bucket',
+      'reconciliation_mismatches_total',
+    ]) {
+      expect(before).toContain(name);
+    }
+
+    const w = await newWallet('100.00');
+    const bet = tx(w, { money: money('10.00') });
+    await post(bet);
+    await post(bet); // replay
+    await post(tx(w, { money: money('500.00') })); // rejeitada
+
+    const after = await scrape();
+    const processed = 'wager_transactions_total{status="PROCESSED",kind="BET"}';
+    const rejected = 'wager_transactions_total{status="REJECTED",kind="BET"}';
+    expect(sample(after, processed) - sample(before, processed)).toBe(1);
+    expect(sample(after, rejected) - sample(before, rejected)).toBe(1);
+    // a repetição conta como replay, não como transação nova
+    expect(sample(after, 'idempotent_replays_total') - sample(before, 'idempotent_replays_total')).toBe(1);
+    expect(sample(after, 'wager_processing_seconds_count{kind="BET"}')).toBeGreaterThanOrEqual(3);
+    // as gauges da outbox vêm do banco no momento do scrape
+    expect(after).toMatch(/^outbox_pending \d+/m);
+    expect(after).toMatch(/^outbox_lag_seconds [\d.]+/m);
+  });
+
+  test('conflito de idempotência e divergência de reconciliação são contados', async () => {
+    const before = await scrape();
+    const w = await newWallet('100.00');
+    const body = tx(w);
+    const key = `${body.providerId}:${body.externalTransactionId}`;
+    await post(body, key);
+    await post({ ...body, money: money('26.00') }, key); // 409
+
+    const orm = await createTestOrm();
+    await orm.em.fork().execute('update wallets set balance = 1.00 where id = ?', [w.walletId]);
+    await orm.close();
+    const rec = await call('POST', `/wallets/${w.walletId}/reconciliation`);
+    expect(rec.json.consistent).toBe(false);
+
+    const after = await scrape();
+    const conflict = 'wager_request_errors_total{code="IDEMPOTENCY_CONFLICT"}';
+    expect(sample(after, conflict) - sample(before, conflict)).toBe(1);
+    expect(
+      sample(after, 'reconciliation_mismatches_total') - sample(before, 'reconciliation_mismatches_total'),
+    ).toBe(1);
+  });
+});
+
 describe('HTTP sob concorrência', () => {
   test('50 requisições idênticas em paralelo: um 201 e 49 replays 200', async () => {
     const w = await newWallet('100.00');

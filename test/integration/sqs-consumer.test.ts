@@ -1,7 +1,9 @@
 import { ReceiveMessageCommand } from '@aws-sdk/client-sqs';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import type { MikroORM } from '@mikro-orm/postgresql';
-import { SqsWagerConsumer } from '../../src/interfaces/sqs/sqs-wager-consumer';
+import { SubmitWagerTransaction } from '../../src/application/submit-wager-transaction';
+import { systemClock, uuidV7Generator } from '../../src/application/support';
+import { type ConsumerObserver, SqsWagerConsumer } from '../../src/interfaces/sqs/sqs-wager-consumer';
 import { type MessageDecision, WagerMessageHandler } from '../../src/interfaces/sqs/wager-message-handler';
 import { type Harness, buildHarness } from './harness';
 import { createTestOrm, resetSchema } from './support';
@@ -31,6 +33,7 @@ async function setup(
     maxReceive?: number;
     visibility?: number;
     consumer?: { visibilityTimeoutSeconds?: number };
+    observer?: ConsumerObserver;
   } = {},
 ) {
   const queues = await createTestQueues(opts.maxReceive ?? 3, opts.visibility ?? 5);
@@ -40,6 +43,7 @@ async function setup(
     waitTimeSeconds: 1,
     retryBaseSeconds: 1,
     shutdownTimeoutMs: 8000,
+    observer: opts.observer,
     ...opts.consumer,
   });
   consumersToStop.push(consumer);
@@ -163,6 +167,63 @@ describe('consumidor SQS', () => {
     expect(dead).toHaveLength(1);
     expect(dead[0]!.attributes.failureReason).toStartWith('INBOX_PAYLOAD_MISMATCH');
     expect(await balanceOf(w.walletId)).toEqual(money('75.00'));
+  });
+});
+
+describe('observabilidade do consumo', () => {
+  test('acks, duplicatas da inbox e transações tratadas chegam aos observers', async () => {
+    const seen = { acks: [] as string[], duplicates: 0, handled: [] as string[] };
+    const submit = new SubmitWagerTransaction({
+      uow: h.uow,
+      clock: systemClock,
+      ids: uuidV7Generator,
+      observer: {
+        inboxDuplicate: () => void seen.duplicates++,
+        handled: (e) => void seen.handled.push(`${e.status}:${e.idempotentReplay}:${e.messageId}`),
+      },
+    });
+    const { queues, consumer } = await setup({
+      handler: new WagerMessageHandler(submit),
+      observer: { onAck: (o) => void seen.acks.push(o) },
+    });
+    const w = await h.wallet('100.00');
+    const msg = wagerMessage(w);
+    for (let i = 0; i < 3; i++) await send(queues.queueUrl, msg, w.walletId, `obs-${i}`);
+    consumer.start();
+
+    await waitFor(() => isDrained(queues.queueUrl), 20_000, 'fila vazia');
+    expect(seen.acks).toEqual(['processed', 'replay', 'replay']);
+    expect(seen.duplicates).toBe(2);
+    expect(seen.handled).toEqual([
+      `PROCESSED:false:${msg.messageId}`,
+      `PROCESSED:true:${msg.messageId}`,
+      `PROCESSED:true:${msg.messageId}`,
+    ]);
+  });
+
+  test('retries e mensagens enviadas à DLQ são contados', async () => {
+    const counts = { retries: 0, dlq: [] as string[] };
+    let calls = 0;
+    const real = new WagerMessageHandler(h.submit);
+    const handler = {
+      handle: async (body: string): Promise<MessageDecision> => {
+        if (body === 'lixo') return real.handle(body);
+        return ++calls === 1 ? { action: 'retry', reason: 'TRANSIENT: x' } : real.handle(body);
+      },
+    };
+    const { queues, consumer } = await setup({
+      handler,
+      maxReceive: 10,
+      observer: { onRetry: () => void counts.retries++, onDeadLetter: (r) => void counts.dlq.push(r) },
+    });
+    const w = await h.wallet('100.00');
+    await send(queues.queueUrl, wagerMessage(w), w.walletId);
+    await send(queues.queueUrl, 'lixo', 'outro-grupo');
+    consumer.start();
+
+    await waitFor(() => isDrained(queues.queueUrl), 30_000, 'fila vazia');
+    expect(counts.retries).toBe(1);
+    expect(counts.dlq).toEqual(['INVALID_JSON']);
   });
 });
 
