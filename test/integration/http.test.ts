@@ -70,6 +70,12 @@ describe('health', () => {
     expect(r.status).toBe(200);
     expect(r.json).toEqual({ status: 'ok' });
   });
+
+  test('readiness confere Postgres e SQS e também é público', async () => {
+    const r = await call('GET', '/health/ready');
+    expect(r.status).toBe(200);
+    expect(r.json).toEqual({ status: 'ok', checks: { postgres: 'up', sqs: 'up' } });
+  });
 });
 
 describe('POST /wallets', () => {
