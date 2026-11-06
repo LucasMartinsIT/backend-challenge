@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { safeErrorSummary } from '../observability/safe-error';
 
 /**
  * Executa `task` em loop. Se a tarefa fez trabalho, roda de novo na hora (drena o backlog);
@@ -35,7 +36,7 @@ export class PeriodicRunner {
       try {
         worked = await this.task();
       } catch (err) {
-        this.logger.error(`iteração falhou: ${err instanceof Error ? err.message : String(err)}`);
+        this.logger.error({ msg: 'iteração falhou', event: 'worker.iteration_failed', worker: this.name, error: safeErrorSummary(err) });
       }
       if (!this.stopping && worked === 0) await this.sleep();
     }

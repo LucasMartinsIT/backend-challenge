@@ -2,6 +2,7 @@ import { type ArgumentsHost, Catch, type ExceptionFilter, HttpException, Logger 
 import type { Response } from 'express';
 import { ApplicationError } from '../../application/errors';
 import { DomainError } from '../../domain/errors/domain-errors';
+import { safeErrorSummary } from '../../infrastructure/observability/safe-error';
 import { isTransientInfraError } from '../../infrastructure/persistence/transient-errors';
 
 const STATUS_BY_CODE: Record<string, number> = {
@@ -37,14 +38,15 @@ export class HttpErrorFilter implements ExceptionFilter {
     }
 
     if (isTransientInfraError(err)) {
-      this.logger.warn(`falha transitória de infraestrutura: ${(err as Error).message}`);
+      this.logger.warn({ msg: 'falha transitória de infraestrutura', event: 'http.transient_error', error: safeErrorSummary(err) });
       return res
         .status(503)
         .set('Retry-After', '1')
         .json({ error: { code: 'SERVICE_UNAVAILABLE', message: 'indisponível no momento, tente novamente' } });
     }
 
-    this.logger.error(err instanceof Error ? err.stack : String(err));
+    // não loga a mensagem crua: erros de banco trazem o SQL com os valores
+    this.logger.error({ msg: 'erro inesperado', event: 'http.unexpected_error', error: safeErrorSummary(err) });
     return res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: 'erro interno' } });
   }
 }

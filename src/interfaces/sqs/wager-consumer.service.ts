@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { SubmitWagerTransaction } from '../../application/submit-wager-transaction';
 import { APP_CONFIG, type AppConfig } from '../../config';
+import { Metrics } from '../../infrastructure/observability/metrics';
 import { createSqsClient } from '../../infrastructure/sqs/sqs-client';
 import { SqsWagerConsumer } from './sqs-wager-consumer';
 import { WagerMessageHandler } from './wager-message-handler';
@@ -17,6 +18,7 @@ export class WagerConsumerService implements OnApplicationBootstrap, BeforeAppli
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
     @Inject(SubmitWagerTransaction) private readonly submit: SubmitWagerTransaction,
+    @Inject(Metrics) private readonly metrics: Metrics,
   ) {}
 
   onApplicationBootstrap() {
@@ -25,6 +27,11 @@ export class WagerConsumerService implements OnApplicationBootstrap, BeforeAppli
       queueUrl: this.config.WAGER_QUEUE_URL,
       dlqUrl: this.config.WAGER_DLQ_URL,
       retryBaseSeconds: this.config.CONSUMER_RETRY_BASE_SECONDS,
+      observer: {
+        onAck: (outcome) => this.metrics.sqsAcks.inc({ outcome }),
+        onRetry: () => this.metrics.sqsRetries.inc(),
+        onDeadLetter: (reason) => this.metrics.sqsDeadLetters.inc({ reason }),
+      },
     });
     this.consumer.start();
   }

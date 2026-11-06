@@ -4,7 +4,7 @@ import { ApplicationError } from '../../application/errors';
 import { WalletQueries } from '../../application/queries';
 import { SubmitWagerTransaction, type SubmitWagerResult } from '../../application/submit-wager-transaction';
 import { WagerTransactionStatus } from '../../domain/wagering/wager-transaction';
-import { correlationIdOf } from './correlation';
+import { correlationIdOf, setLogContext } from './correlation';
 import { parse, submitTransactionSchema, uuidParam } from './validation';
 
 class MissingIdempotencyKeyError extends ApplicationError {
@@ -55,6 +55,14 @@ export class WageringController {
     });
 
     res.status(statusFor(result));
+    setLogContext(res, {
+      transactionId: result.transactionId,
+      walletId: input.walletId,
+      providerId: input.providerId,
+      kind: input.kind,
+      status: result.status,
+      failureCode: result.failureCode,
+    });
     const terminalFailure =
       result.status === WagerTransactionStatus.Rejected || result.status === WagerTransactionStatus.Failed;
     if (terminalFailure && result.failureCode) {

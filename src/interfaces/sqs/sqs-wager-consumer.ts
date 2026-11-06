@@ -7,7 +7,14 @@ import {
   type SQSClient,
 } from '@aws-sdk/client-sqs';
 import { Logger } from '@nestjs/common';
+import { safeErrorSummary } from '../../infrastructure/observability/safe-error';
 import type { MessageDecision } from './wager-message-handler';
+
+export interface ConsumerObserver {
+  onAck?(outcome: string): void;
+  onRetry?(): void;
+  onDeadLetter?(reason: string): void;
+}
 
 export interface ConsumerOptions {
   queueUrl: string;
@@ -20,6 +27,7 @@ export interface ConsumerOptions {
   maxRetryDelaySeconds?: number;
   /** Mesmo valor do VisibilityTimeout da fila; usado para não segurar mensagens além do prazo. */
   visibilityTimeoutSeconds?: number;
+  observer?: ConsumerObserver;
 }
 
 interface Handler {
@@ -27,11 +35,19 @@ interface Handler {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const describeError = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 // Se a mensagem passou desta fração do visibility timeout esperando na fila local, a fila já
 // pode tê-la entregue a outra instância; melhor devolver o resto do grupo.
 const VISIBILITY_BUDGET = 0.6;
+
+// o observer nunca pode atrapalhar o consumo
+function notify(fn: (() => void) | undefined) {
+  try {
+    fn?.();
+  } catch {
+    // ignora
+  }
+}
 
 export class SqsWagerConsumer {
   private readonly logger = new Logger('SqsWagerConsumer');
@@ -63,7 +79,11 @@ export class SqsWagerConsumer {
     if (!this.loop) {
       this.loop = this.run().catch((err) => {
         // run() já trata os erros esperados; chegar aqui é bug, e não pode morrer em silêncio
-        this.logger.error(`o loop do consumidor terminou com erro: ${describeError(err)}`);
+        this.logger.error({
+          msg: 'o loop do consumidor terminou com erro',
+          event: 'sqs.loop_crashed',
+          error: safeErrorSummary(err),
+        });
       });
     }
   }
@@ -77,7 +97,9 @@ export class SqsWagerConsumer {
       this.loop.then(() => true),
       sleep(this.shutdownTimeoutMs).then(() => false),
     ]);
-    if (!finished) this.logger.warn('shutdown atingiu o timeout com mensagens em andamento');
+    if (!finished) {
+      this.logger.warn({ msg: 'shutdown atingiu o timeout com mensagens em andamento', event: 'sqs.shutdown_timeout' });
+    }
   }
 
   private async run(): Promise<void> {
@@ -96,7 +118,7 @@ export class SqsWagerConsumer {
         messages = out.Messages ?? [];
       } catch (err) {
         if (this.stopping) break;
-        this.logger.error(`falha ao receber mensagens: ${describeError(err)}`);
+        this.logger.error({ msg: 'falha ao receber mensagens', event: 'sqs.receive_failed', error: safeErrorSummary(err) });
         await sleep(1000);
         continue;
       }
@@ -104,7 +126,7 @@ export class SqsWagerConsumer {
       try {
         await this.processBatch(messages);
       } catch (err) {
-        this.logger.error(`falha ao processar o lote: ${describeError(err)}`);
+        this.logger.error({ msg: 'falha ao processar o lote', event: 'sqs.batch_failed', error: safeErrorSummary(err) });
       }
     }
   }
@@ -118,7 +140,7 @@ export class SqsWagerConsumer {
       let key = m.Attributes?.MessageGroupId;
       if (!key) {
         // sem o grupo não dá para paralelizar com segurança: trata tudo como um grupo só
-        this.logger.warn('mensagem sem MessageGroupId; processando em sequência');
+        this.logger.warn({ msg: 'mensagem sem MessageGroupId; processando em sequência', event: 'sqs.no_group' });
         key = '__sem-grupo__';
       }
       groups.set(key, [...(groups.get(key) ?? []), m]);
@@ -155,24 +177,36 @@ export class SqsWagerConsumer {
     try {
       decision = await this.handler.handle(message.Body ?? '');
     } catch (err) {
-      decision = { action: 'retry', reason: `HANDLER: ${describeError(err)}` };
+      decision = { action: 'retry', reason: `HANDLER: ${safeErrorSummary(err)}` };
     }
+    const messageId = decision.messageId ?? message.MessageId;
 
     try {
       switch (decision.action) {
         case 'ack':
           // o commit já aconteceu dentro do handler; só agora a mensagem sai da fila
           await this.remove(message);
+          this.logger.debug({ msg: 'mensagem confirmada', event: 'sqs.ack', messageId, outcome: decision.outcome });
+          notify(() => this.options.observer?.onAck?.(decision.outcome));
           return 'done';
-        case 'retry':
-          return await this.delay(message, decision.reason);
+        case 'retry': {
+          const seconds = await this.delay(message, messageId, decision.reason);
+          notify(() => this.options.observer?.onRetry?.());
+          return seconds;
+        }
         case 'dead-letter':
-          await this.deadLetter(message, decision.reason);
+          await this.deadLetter(message, messageId, decision.reason);
+          notify(() => this.options.observer?.onDeadLetter?.(decision.reason.split(':')[0] ?? 'UNKNOWN'));
           return 'done';
       }
     } catch (err) {
       // se confirmar falhar, a mensagem reaparece e o replay é inofensivo (inbox + idempotência)
-      this.logger.error(`falha ao finalizar mensagem ${decision.messageId ?? message.MessageId}: ${describeError(err)}`);
+      this.logger.error({
+        msg: 'falha ao finalizar a mensagem',
+        event: 'sqs.finalize_failed',
+        messageId,
+        error: safeErrorSummary(err),
+      });
       return this.visibilityTimeoutSeconds;
     }
   }
@@ -183,10 +217,17 @@ export class SqsWagerConsumer {
     );
   }
 
-  private async delay(message: Message, reason: string): Promise<number> {
+  private async delay(message: Message, messageId: string | undefined, reason: string): Promise<number> {
     const received = Number(message.Attributes?.ApproximateReceiveCount ?? '1');
     const seconds = Math.min(this.retryBaseSeconds * 2 ** (received - 1), this.maxRetryDelaySeconds);
-    this.logger.warn(`retry em ${seconds}s (tentativa ${received}): ${reason.slice(0, 120)}`);
+    this.logger.warn({
+      msg: 'mensagem devolvida para nova tentativa',
+      event: 'sqs.retry',
+      messageId,
+      receiveCount: received,
+      delaySeconds: seconds,
+      reason: reason.slice(0, 160),
+    });
     await this.sqs.send(
       new ChangeMessageVisibilityCommand({
         QueueUrl: this.options.queueUrl,
@@ -200,8 +241,13 @@ export class SqsWagerConsumer {
   // Envio explícito para a DLQ (e não esperar o redrive) porque aqui já se sabe que nenhuma
   // nova tentativa vai ajudar. Se cair entre o envio e o delete, a deduplicação da DLQ FIFO
   // absorve o reenvio.
-  private async deadLetter(message: Message, reason: string) {
-    this.logger.error(`mensagem ${message.MessageId} vai para a DLQ: ${reason.slice(0, 120)}`);
+  private async deadLetter(message: Message, messageId: string | undefined, reason: string) {
+    this.logger.error({
+      msg: 'mensagem enviada para a DLQ',
+      event: 'sqs.dead_letter',
+      messageId,
+      reason: reason.slice(0, 160),
+    });
     await this.sqs.send(
       new SendMessageCommand({
         QueueUrl: this.options.dlqUrl,
@@ -225,7 +271,12 @@ export class SqsWagerConsumer {
         }),
       );
     } catch (err) {
-      this.logger.warn(`não consegui devolver a mensagem ${message.MessageId}: ${describeError(err)}`);
+      this.logger.warn({
+        msg: 'não consegui devolver a mensagem',
+        event: 'sqs.release_failed',
+        messageId: message.MessageId,
+        error: safeErrorSummary(err),
+      });
     }
   }
 }

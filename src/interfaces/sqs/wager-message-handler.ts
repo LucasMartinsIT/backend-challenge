@@ -9,6 +9,7 @@ import type { SubmitWagerCommand, SubmitWagerResult } from '../../application/su
 import { InvalidMoneyError, InvalidTransactionError } from '../../domain/errors/domain-errors';
 import { canonicalJson } from '../../domain/wagering/payload-hash';
 import { WagerTransactionKind } from '../../domain/wagering/wager-transaction';
+import { safeErrorSummary } from '../../infrastructure/observability/safe-error';
 import { isTransientInfraError } from '../../infrastructure/persistence/transient-errors';
 
 export const WAGER_CONSUMER_NAME = 'wager-transactions';
@@ -97,7 +98,9 @@ function classify(err: unknown): MessageDecision {
     err instanceof InvalidTransactionError ||
     err instanceof InboxPayloadMismatchError
   ) {
-    return { action: 'dead-letter', reason: `${err.code}: ${err.message}` };
+    // a mensagem de InvalidMoneyError carrega o valor recebido; no motivo vai só o código
+    const detail = err instanceof InvalidMoneyError ? '' : `: ${err.message}`;
+    return { action: 'dead-letter', reason: `${err.code}${detail}` };
   }
   // erro de negócio terminal: repetir não muda o resultado, então confirma e segue
   if (
@@ -108,8 +111,8 @@ function classify(err: unknown): MessageDecision {
     return { action: 'ack', outcome: 'business-error', detail: err.code };
   }
   if (isTransientInfraError(err)) {
-    return { action: 'retry', reason: `TRANSIENT: ${(err as Error).message}` };
+    return { action: 'retry', reason: `TRANSIENT: ${safeErrorSummary(err)}` };
   }
   // falha inesperada: tenta de novo; o limite de recebimentos da fila leva para a DLQ
-  return { action: 'retry', reason: `UNEXPECTED: ${(err as Error).message}` };
+  return { action: 'retry', reason: `UNEXPECTED: ${safeErrorSummary(err)}` };
 }

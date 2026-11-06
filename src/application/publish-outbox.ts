@@ -8,6 +8,8 @@ export interface PublishOutboxOptions {
   maxAttempts: number;
   /** Chamado quando um evento é abandonado, para log e métrica. */
   onAbandoned?: (message: OutboxMessage) => void;
+  onPublished?: (message: OutboxMessage) => void;
+  onPublishFailed?: (message: OutboxMessage) => void;
 }
 
 export const DEFAULT_OUTBOX_OPTIONS: PublishOutboxOptions = { batchSize: 50, maxAttempts: 20 };
@@ -60,8 +62,10 @@ export class PublishOutbox {
 
               if (delivered) {
                 message.markPublished(clock.now());
+                this.options.onPublished?.(message);
                 continue;
               }
+              this.options.onPublishFailed?.(message);
 
               const now = clock.now();
               message.scheduleRetry(now);

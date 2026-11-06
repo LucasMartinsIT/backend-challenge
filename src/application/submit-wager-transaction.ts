@@ -13,6 +13,7 @@ import {
   InboxPayloadMismatchError,
   WalletNotFoundError,
 } from './errors';
+import { type WagerObserver, safely } from './observability';
 import type { StoredWagerTransaction, UnitOfWork } from './ports';
 import type { Clock, IdGenerator } from './support';
 import { applyTransaction, enqueueEvents, eventsFor } from './wager-processing';
@@ -55,10 +56,42 @@ function isIdempotencyRace(err: unknown): boolean {
 
 export class SubmitWagerTransaction {
   constructor(
-    private readonly deps: { uow: UnitOfWork; clock: Clock; ids: IdGenerator },
+    private readonly deps: { uow: UnitOfWork; clock: Clock; ids: IdGenerator; observer?: WagerObserver },
   ) {}
 
   async execute(cmd: SubmitWagerCommand): Promise<SubmitWagerResult> {
+    const { observer } = this.deps;
+    const started = performance.now();
+    const meta = { inboxDuplicate: false };
+
+    let result: SubmitWagerResult;
+    try {
+      result = await this.process(cmd, meta);
+    } catch (err) {
+      safely(() => observer?.failed?.((err as { code?: string }).code ?? 'INTERNAL'));
+      throw err;
+    }
+
+    // só depois do commit: tentativas que sofreram rollback não entram nas métricas
+    if (meta.inboxDuplicate) safely(() => observer?.inboxDuplicate?.());
+    safely(() =>
+      observer?.handled?.({
+        correlationId: cmd.correlationId,
+        messageId: cmd.inbox?.messageId,
+        transactionId: result.transactionId,
+        walletId: cmd.walletId,
+        providerId: cmd.providerId,
+        kind: cmd.kind,
+        status: result.status,
+        failureCode: result.failureCode,
+        idempotentReplay: result.idempotentReplay,
+        durationMs: performance.now() - started,
+      }),
+    );
+    return result;
+  }
+
+  private async process(cmd: SubmitWagerCommand, meta: { inboxDuplicate: boolean }): Promise<SubmitWagerResult> {
     const money = Money.from(cmd.money);
     const payloadHash = hashPayload({ ...cmd, money: money.toJSON() });
 
@@ -66,7 +99,7 @@ export class SubmitWagerTransaction {
     // wallet; a unique do banco derruba uma delas. Na segunda rodada ela já encontra a outra.
     for (let attempt = 1; ; attempt++) {
       try {
-        return await this.executeOnce(cmd, money, payloadHash);
+        return await this.executeOnce(cmd, money, payloadHash, meta);
       } catch (err) {
         if (attempt === 1 && isIdempotencyRace(err)) continue;
         throw err;
@@ -74,13 +107,20 @@ export class SubmitWagerTransaction {
     }
   }
 
-  private executeOnce(cmd: SubmitWagerCommand, money: Money, payloadHash: string) {
+  private executeOnce(
+    cmd: SubmitWagerCommand,
+    money: Money,
+    payloadHash: string,
+    meta: { inboxDuplicate: boolean },
+  ) {
     const { uow, clock, ids } = this.deps;
 
     return uow.run(async (repos): Promise<SubmitWagerResult> => {
       const now = clock.now();
+      meta.inboxDuplicate = false;
       if (cmd.inbox) {
         const first = await repos.inbox.tryReceive(InboxMessage.receive({ ...cmd.inbox, receivedAt: now }));
+        meta.inboxDuplicate = !first;
         if (!first) {
           // redelivery: a mensagem tem de ser a mesma. Se o conteúdo mudou, é erro permanente.
           const seen = await repos.inbox.find(cmd.inbox.consumerName, cmd.inbox.messageId);

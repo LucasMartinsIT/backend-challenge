@@ -2,7 +2,7 @@ import { Body, Controller, Get, HttpCode, Inject, Param, Post, Query, Req, Res }
 import type { Request, Response } from 'express';
 import { CreateWallet } from '../../application/create-wallet';
 import { WalletQueries } from '../../application/queries';
-import { correlationIdOf } from './correlation';
+import { correlationIdOf, setLogContext } from './correlation';
 import { createWalletSchema, ledgerQuerySchema, parse, uuidParam } from './validation';
 
 @Controller('wallets')
@@ -17,6 +17,7 @@ export class WalletsController {
     const input = parse(createWalletSchema, body);
     const created = await this.createWallet.execute({ ...input, correlationId: correlationIdOf(req, res) });
     res.status(201);
+    setLogContext(res, { walletId: created.id });
     return created;
   }
 

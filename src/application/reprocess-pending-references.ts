@@ -32,6 +32,8 @@ export class ReprocessPendingReferences {
       ids: IdGenerator;
       /** Para log e métrica de erros por candidata. */
       onError?: (candidate: PendingReferenceCandidate, err: unknown) => void;
+      /** Uma pendente chegou a um estado final (PROCESSED, REJECTED...), já com o commit feito. */
+      onResolved?: (status: string) => void;
     },
     private readonly options: PendingReferenceOptions = DEFAULT_PENDING_OPTIONS,
   ) {}
@@ -45,7 +47,8 @@ export class ReprocessPendingReferences {
 
     for (const candidate of candidates) {
       try {
-        await this.reprocess(candidate);
+        const finalStatus = await this.reprocess(candidate);
+        if (finalStatus) this.deps.onResolved?.(finalStatus);
       } catch (err) {
         // uma candidata com defeito não pode travar as outras, nem ficar sendo a primeira da fila
         // para sempre: o erro conta como tentativa e ela é reagendada
@@ -59,16 +62,16 @@ export class ReprocessPendingReferences {
   private reprocess(candidate: PendingReferenceCandidate) {
     const { uow, clock, ids } = this.deps;
 
-    return uow.run(async (repos) => {
+    return uow.run(async (repos): Promise<string | undefined> => {
       const now = clock.now();
 
       // mesma ordem de locks do fluxo de submissão: wallet primeiro, depois a transação
       const wallet = await repos.wallets.findByIdForUpdate(candidate.walletId);
-      if (!wallet) return;
+      if (!wallet) return undefined;
       // Relê só se ainda estiver vencida. Com várias instâncias, quem esperava o lock da wallet
       // encontra a linha já reagendada pela que chegou primeiro e não gasta outra tentativa.
       const row = await repos.transactions.findPendingReferenceForUpdate(candidate.id, now);
-      if (!row) return;
+      if (!row) return undefined;
 
       const { transaction: tx, attempts } = row;
       const versionBefore = wallet.version;
@@ -79,7 +82,7 @@ export class ReprocessPendingReferences {
         if (next < this.options.maxAttempts) {
           const delay = pendingBackoffMs(next, this.options);
           await repos.transactions.rescheduleReference(tx.id, next, new Date(now.getTime() + delay));
-          return;
+          return undefined;
         }
         // acabou o prazo: a referência não apareceu
         tx.reject(FailureCode.ReferenceNotFound);
@@ -91,6 +94,7 @@ export class ReprocessPendingReferences {
       }
       await repos.transactions.update(tx, wallet.balance);
       await enqueueEvents(repos, eventsFor(tx, wallet, entry, ids, { correlationId: tx.id, now }));
+      return tx.status;
     });
   }
 
