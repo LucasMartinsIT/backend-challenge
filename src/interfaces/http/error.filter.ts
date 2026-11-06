@@ -2,6 +2,7 @@ import { type ArgumentsHost, Catch, type ExceptionFilter, HttpException, Logger 
 import type { Response } from 'express';
 import { ApplicationError } from '../../application/errors';
 import { DomainError } from '../../domain/errors/domain-errors';
+import { isTransientInfraError } from '../../infrastructure/persistence/transient-errors';
 
 const STATUS_BY_CODE: Record<string, number> = {
   VALIDATION_ERROR: 400,
@@ -17,17 +18,6 @@ const STATUS_BY_CODE: Record<string, number> = {
   INBOX_PAYLOAD_MISMATCH: 409,
   WALLET_ALREADY_EXISTS: 409,
 };
-
-// falhas que o provedor pode simplesmente repetir: deadlock, serialização, lock timeout,
-// banco indisponível, pool esgotado
-const TRANSIENT_PG_CODES = new Set(['40P01', '40001', '55P03', '57P01', '57P03', '53300', '08000', '08003', '08006']);
-const TRANSIENT_NET_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE']);
-
-export function isTransientInfraError(err: unknown): boolean {
-  const e = err as { code?: string; name?: string; message?: string };
-  if (e.code && (TRANSIENT_PG_CODES.has(e.code) || TRANSIENT_NET_CODES.has(e.code))) return true;
-  return /timeout|Connection terminated|connection.*(closed|refused)/i.test(e.message ?? '');
-}
 
 @Catch()
 export class HttpErrorFilter implements ExceptionFilter {

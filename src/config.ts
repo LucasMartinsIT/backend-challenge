@@ -10,6 +10,7 @@ const schema = z.object({
   WAGER_QUEUE_URL: z.string().default('http://localhost:4566/000000000000/wager-transactions.fifo'),
   WAGER_DLQ_URL: z.string().default('http://localhost:4566/000000000000/wager-transactions-dlq.fifo'),
   EVENTS_QUEUE_URL: z.string().default('http://localhost:4566/000000000000/wallet-events.fifo'),
+  CONSUMER_RETRY_BASE_SECONDS: z.coerce.number().int().min(0).default(2),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
   INSTANCE_ID: z.string().default(`pid-${process.pid}`),
   // permitem subir uma instância só de API ou só de workers
