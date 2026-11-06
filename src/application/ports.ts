@@ -28,8 +28,15 @@ export interface WagerTransactionRepository {
     providerId: string,
     externalTransactionId: string,
   ): Promise<StoredWagerTransaction | undefined>;
-  insert(tx: WagerTransaction, balanceAfter?: Money): Promise<void>;
+  insert(tx: WagerTransaction, balanceAfter?: Money, schedule?: RetrySchedule): Promise<void>;
   update(tx: WagerTransaction, balanceAfter?: Money): Promise<void>;
+  /** Já existe REFUND/ROLLBACK processado apontando para esta transação? */
+  hasProcessedReversalOf(referenceTransactionId: string): Promise<boolean>;
+}
+
+export interface RetrySchedule {
+  attempts: number;
+  nextAttemptAt: Date;
 }
 
 export interface LedgerPage {
@@ -42,6 +49,14 @@ export interface LedgerRepository {
   page(walletId: string, afterSeq: string | undefined, limit: number): Promise<LedgerPage>;
   /** Saldo reconstruído: soma de créditos menos débitos. */
   rebuildBalance(walletId: string, currency: string): Promise<{ balance: Money; entries: number }>;
+  /** Saldo gravado e saldo reconstruído lidos num único statement (mesmo snapshot, sem lock). */
+  reconciliationSnapshot(walletId: string): Promise<ReconciliationSnapshot | undefined>;
+}
+
+export interface ReconciliationSnapshot {
+  stored: Money;
+  calculated: Money;
+  entries: number;
 }
 
 export interface InboxRepository {

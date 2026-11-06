@@ -5,7 +5,9 @@ import {
   type LedgerPage,
   type LedgerRepository,
   type OutboxRepository,
+  type ReconciliationSnapshot,
   type Repositories,
+  type RetrySchedule,
   StaleWalletVersionError,
   type StoredWagerTransaction,
   type WagerTransactionRepository,
@@ -81,13 +83,28 @@ class PgWagerTransactionRepository implements WagerTransactionRepository {
     return this.findOneBy({ providerId, externalTransactionId });
   }
 
-  async insert(tx: WagerTransaction, balanceAfter?: Money) {
-    await this.em.insert(WagerTransactionSchema, transactionToRecord(tx, balanceAfter));
+  async insert(tx: WagerTransaction, balanceAfter?: Money, schedule?: RetrySchedule) {
+    await this.em.insert(
+      WagerTransactionSchema,
+      transactionToRecord(tx, balanceAfter, schedule?.attempts ?? 0, schedule?.nextAttemptAt ?? null),
+    );
+  }
+
+  async hasProcessedReversalOf(referenceTransactionId: string) {
+    const rows: unknown[] = await this.em.execute(
+      `select 1 from wager_transactions
+        where reference_transaction_id = ? and status = 'PROCESSED' and kind in ('REFUND','ROLLBACK')
+        limit 1`,
+      [referenceTransactionId],
+    );
+    return rows.length > 0;
   }
 
   async update(tx: WagerTransaction, balanceAfter?: Money) {
-    const { id: _id, attempts: _a, nextAttemptAt: _n, ...changes } = transactionToRecord(tx, balanceAfter);
-    await this.em.nativeUpdate(WagerTransactionSchema, { id: tx.id }, changes);
+    const { id: _id, attempts: _a, nextAttemptAt: _n, balanceAfter: after, ...changes } =
+      transactionToRecord(tx, balanceAfter);
+    // sem saldo novo, mantém o que já estava gravado: é ele que o replay devolve
+    await this.em.nativeUpdate(WagerTransactionSchema, { id: tx.id }, after === null ? changes : { ...changes, balanceAfter: after });
   }
 
   private async findOneBy(where: Partial<WagerTransactionRecord>): Promise<StoredWagerTransaction | undefined> {
@@ -157,7 +174,8 @@ class PgLedgerRepository implements LedgerRepository {
           money: moneyFromDb(r.amount, r.currency.trim()),
           balanceBefore: moneyFromDb(r.balance_before, r.currency.trim()),
           balanceAfter: moneyFromDb(r.balance_after, r.currency.trim()),
-          createdAt: r.created_at,
+          // execute() cru não converte timestamptz; garantir Date aqui
+          createdAt: new Date(r.created_at),
         }),
       })),
     };
@@ -171,6 +189,27 @@ class PgLedgerRepository implements LedgerRepository {
       [walletId],
     );
     return { balance: moneyFromDb(row?.total ?? '0.00', currency), entries: row?.entries ?? 0 };
+  }
+
+  async reconciliationSnapshot(walletId: string): Promise<ReconciliationSnapshot | undefined> {
+    const [row]: Array<{ currency: string; stored: string; calculated: string; entries: number }> =
+      await this.em.execute(
+        `select w.currency, w.balance::text as stored,
+                coalesce(sum(case when l.direction = 'CREDIT' then l.amount else -l.amount end), 0)::text as calculated,
+                count(l.id)::int as entries
+           from wallets w
+           left join wallet_ledger_entries l on l.wallet_id = w.id
+          where w.id = ?
+          group by w.id`,
+        [walletId],
+      );
+    if (!row) return undefined;
+    const currency = row.currency.trim();
+    return {
+      stored: moneyFromDb(row.stored, currency),
+      calculated: moneyFromDb(row.calculated, currency),
+      entries: row.entries,
+    };
   }
 }
 
@@ -204,8 +243,8 @@ class PgInboxRepository implements InboxRepository {
       messageId: r.message_id,
       consumerName: r.consumer_name,
       payloadHash: r.payload_hash,
-      receivedAt: r.received_at,
-      processedAt: r.processed_at ?? undefined,
+      receivedAt: new Date(r.received_at),
+      processedAt: r.processed_at ? new Date(r.processed_at) : undefined,
     });
   }
 
