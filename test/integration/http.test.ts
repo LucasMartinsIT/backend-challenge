@@ -14,6 +14,9 @@ beforeAll(async () => {
 
   process.env.DATABASE_URL = TEST_DATABASE_URL;
   process.env.LOG_LEVEL = 'silent';
+  // este teste não pode consumir da fila real
+  process.env.ENABLE_CONSUMER = 'false';
+  process.env.ENABLE_WORKERS = 'false';
   const { AppModule } = await import('../../src/app.module');
   app = await NestFactory.create(AppModule, { logger: false });
   await app.listen(0);
