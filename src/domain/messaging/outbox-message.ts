@@ -9,6 +9,7 @@ export interface OutboxMessageState {
   attempts: number;
   nextAttemptAt?: Date | undefined;
   publishedAt?: Date | undefined;
+  failedAt?: Date | undefined;
 }
 
 const BASE_DELAY_MS = 1_000;
@@ -24,6 +25,7 @@ export class OutboxMessage {
     private _attempts: number,
     private _nextAttemptAt?: Date,
     private _publishedAt?: Date,
+    private _failedAt?: Date,
   ) {}
 
   static enqueue(event: IntegrationEvent<unknown>): OutboxMessage {
@@ -47,6 +49,7 @@ export class OutboxMessage {
       state.attempts,
       state.nextAttemptAt,
       state.publishedAt,
+      state.failedAt,
     );
   }
 
@@ -62,8 +65,13 @@ export class OutboxMessage {
     return this._publishedAt;
   }
 
+  get failedAt(): Date | undefined {
+    return this._failedAt;
+  }
+
+  /** Pendente = ainda precisa ser entregue. Publicada e abandonada não são. */
   isPending(): boolean {
-    return this._publishedAt === undefined;
+    return this._publishedAt === undefined && this._failedAt === undefined;
   }
 
   isDue(now: Date): boolean {
@@ -72,6 +80,16 @@ export class OutboxMessage {
 
   markPublished(at: Date): void {
     this._publishedAt = at;
+  }
+
+  /** Desiste da entrega (esgotou as tentativas). Fica gravada para auditoria e sai da fila. */
+  markFailed(at: Date): void {
+    this._failedAt = at;
+  }
+
+  /** Segura a mensagem sem contar tentativa: usada quando um evento anterior da mesma wallet falhou. */
+  postpone(until: Date): void {
+    this._nextAttemptAt = until;
   }
 
   /** Backoff exponencial: 1s, 2s, 4s... limitado a 60s. */
